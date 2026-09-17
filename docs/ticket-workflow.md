@@ -23,7 +23,14 @@ When no category is provided, the application uses `OUTROS`. The initial status 
 - `CONCLUIDO`;
 - `CANCELADO`.
 
-The service accepts status changes according to role permissions. This version does not implement a formal state machine that restricts each transition between these values.
+The service accepts status changes according to role permissions and validates the workflow transition:
+
+- `ABERTO` -> `EM_ANDAMENTO`, `CANCELADO`;
+- `EM_ANDAMENTO` -> `AGUARDANDO_SOLICITANTE`, `AGUARDANDO_TERCEIROS`, `CONCLUIDO`, `CANCELADO`;
+- `AGUARDANDO_SOLICITANTE` -> `EM_ANDAMENTO`, `CONCLUIDO`, `CANCELADO`;
+- `AGUARDANDO_TERCEIROS` -> `EM_ANDAMENTO`, `CONCLUIDO`, `CANCELADO`;
+- `CONCLUIDO` is terminal;
+- `CANCELADO` is terminal.
 
 When a ticket reaches `CONCLUIDO`, `resolved_at` is populated. When it reaches `CONCLUIDO` or `CANCELADO`, `closed_at` is populated. These timestamps are not recalculated after being set.
 

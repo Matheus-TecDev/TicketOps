@@ -103,6 +103,101 @@ def test_admin_assigns_and_technician_updates_ticket(client: TestClient) -> None
     assert priority_response.json()["priority"] == "ALTA"
 
 
+def test_valid_status_transition_keeps_existing_audit_behavior(client: TestClient) -> None:
+    requester_headers = auth_headers(client, "solicitante@example.com", "SolicitanteTest@123")
+    admin_headers = auth_headers(client, "admin@example.com", "AdminTest@123")
+    ticket = create_ticket(client, requester_headers)
+
+    response = client.put(
+        f"/api/tickets/{ticket['id']}",
+        json={"status": "EM_ANDAMENTO"},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "EM_ANDAMENTO"
+
+    detail_response = client.get(f"/api/tickets/{ticket['id']}", headers=admin_headers)
+    assert detail_response.status_code == 200
+    audits = detail_response.json()["audits"]
+    status_audits = [audit for audit in audits if audit["action"] == "STATUS_ALTERADO"]
+    assert len(status_audits) == 1
+    assert status_audits[0]["old_value"] == "ABERTO"
+    assert status_audits[0]["new_value"] == "EM_ANDAMENTO"
+
+
+def test_invalid_status_transition_is_rejected(client: TestClient) -> None:
+    requester_headers = auth_headers(client, "solicitante@example.com", "SolicitanteTest@123")
+    admin_headers = auth_headers(client, "admin@example.com", "AdminTest@123")
+    ticket = create_ticket(client, requester_headers)
+
+    response = client.put(
+        f"/api/tickets/{ticket['id']}",
+        json={"status": "CONCLUIDO"},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "Transicao de status invalida: ABERTO para CONCLUIDO."
+
+
+def test_invalid_status_transition_does_not_mutate_ticket_or_audit(client: TestClient) -> None:
+    requester_headers = auth_headers(client, "solicitante@example.com", "SolicitanteTest@123")
+    admin_headers = auth_headers(client, "admin@example.com", "AdminTest@123")
+    ticket = create_ticket(client, requester_headers)
+
+    response = client.put(
+        f"/api/tickets/{ticket['id']}",
+        json={"status": "CONCLUIDO"},
+        headers=admin_headers,
+    )
+    assert response.status_code == 400
+
+    detail_response = client.get(f"/api/tickets/{ticket['id']}", headers=admin_headers)
+    assert detail_response.status_code == 200
+    body = detail_response.json()
+    assert body["status"] == "ABERTO"
+    assert body["resolved_at"] is None
+    assert body["closed_at"] is None
+    assert [audit["action"] for audit in body["audits"]] == ["CHAMADO_CRIADO"]
+
+
+def test_terminal_ticket_status_cannot_change(client: TestClient) -> None:
+    requester_headers = auth_headers(client, "solicitante@example.com", "SolicitanteTest@123")
+    admin_headers = auth_headers(client, "admin@example.com", "AdminTest@123")
+    ticket = create_ticket(client, requester_headers)
+
+    in_progress_response = client.put(
+        f"/api/tickets/{ticket['id']}",
+        json={"status": "EM_ANDAMENTO"},
+        headers=admin_headers,
+    )
+    assert in_progress_response.status_code == 200
+    concluded_response = client.put(
+        f"/api/tickets/{ticket['id']}",
+        json={"status": "CONCLUIDO"},
+        headers=admin_headers,
+    )
+    assert concluded_response.status_code == 200
+
+    response = client.put(
+        f"/api/tickets/{ticket['id']}",
+        json={"status": "EM_ANDAMENTO"},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "Transicao de status invalida: CONCLUIDO para EM_ANDAMENTO."
+
+    detail_response = client.get(f"/api/tickets/{ticket['id']}", headers=admin_headers)
+    assert detail_response.status_code == 200
+    body = detail_response.json()
+    assert body["status"] == "CONCLUIDO"
+    assert body["resolved_at"] is not None
+    assert body["closed_at"] is not None
+    assert len([audit for audit in body["audits"] if audit["action"] == "STATUS_ALTERADO"]) == 2
+
+
 def test_requester_cannot_update_status(client: TestClient) -> None:
     requester_headers = auth_headers(client, "solicitante@example.com", "SolicitanteTest@123")
     ticket = create_ticket(client, requester_headers)

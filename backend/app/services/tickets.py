@@ -20,6 +20,27 @@ from app.schemas.ticket import TicketCommentCreate, TicketCreate, TicketUpdate
 
 logger = logging.getLogger(__name__)
 ALLOWED_ATTACHMENT_PREFIXES = ("image/", "video/")
+ALLOWED_STATUS_TRANSITIONS: dict[TicketStatus, set[TicketStatus]] = {
+    TicketStatus.ABERTO: {TicketStatus.EM_ANDAMENTO, TicketStatus.CANCELADO},
+    TicketStatus.EM_ANDAMENTO: {
+        TicketStatus.AGUARDANDO_SOLICITANTE,
+        TicketStatus.AGUARDANDO_TERCEIROS,
+        TicketStatus.CONCLUIDO,
+        TicketStatus.CANCELADO,
+    },
+    TicketStatus.AGUARDANDO_SOLICITANTE: {
+        TicketStatus.EM_ANDAMENTO,
+        TicketStatus.CONCLUIDO,
+        TicketStatus.CANCELADO,
+    },
+    TicketStatus.AGUARDANDO_TERCEIROS: {
+        TicketStatus.EM_ANDAMENTO,
+        TicketStatus.CONCLUIDO,
+        TicketStatus.CANCELADO,
+    },
+    TicketStatus.CONCLUIDO: set(),
+    TicketStatus.CANCELADO: set(),
+}
 
 
 def assert_category_exists(db: Session, category_id: int) -> Category:
@@ -90,6 +111,14 @@ def assert_assignee_is_active_technician(db: Session, assignee_id: int | None) -
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Responsavel pelo chamado deve ter perfil TECNICO.",
+        )
+
+
+def assert_status_transition_allowed(current_status: TicketStatus, new_status: TicketStatus) -> None:
+    if new_status not in ALLOWED_STATUS_TRANSITIONS[current_status]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Transicao de status invalida: {current_status} para {new_status}.",
         )
 
 
@@ -177,6 +206,9 @@ def update_ticket(db: Session, ticket: Ticket, payload: TicketUpdate, actor: Use
         assert_assignee_is_active_technician(db, values["assignee_id"])
 
     values = {field: value for field, value in values.items() if value is not None or field == "assignee_id"}
+    if "status" in values and ticket.status != values["status"]:
+        assert_status_transition_allowed(ticket.status, values["status"])
+
     for field, value in values.items():
         old_value = getattr(ticket, field)
         if old_value == value:

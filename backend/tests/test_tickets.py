@@ -1,5 +1,8 @@
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
+from app.core.config import settings
 from conftest import auth_headers
 
 
@@ -41,6 +44,19 @@ def create_user(
     )
     assert response.status_code == 201, response.text
     return response.json()
+
+
+def upload_attachment(
+    client: TestClient,
+    ticket_id: int,
+    headers: dict[str, str],
+    filename: str = "evidencia.png",
+) -> object:
+    return client.post(
+        f"/api/tickets/{ticket_id}/attachments",
+        files={"files": (filename, b"conteudo-do-anexo", "image/png")},
+        headers=headers,
+    )
 
 
 def test_requester_can_create_ticket(client: TestClient) -> None:
@@ -295,6 +311,122 @@ def test_unassigned_technician_cannot_comment_on_ticket_assigned_to_another_tech
     detail_response = client.get(f"/api/tickets/{ticket['id']}", headers=admin_headers)
     assert detail_response.status_code == 200
     assert detail_response.json()["comments"] == []
+
+
+def test_authorized_user_can_upload_and_download_ticket_attachment(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path))
+    requester_headers = auth_headers(client, "solicitante@example.com", "SolicitanteTest@123")
+    admin_headers = auth_headers(client, "admin@example.com", "AdminTest@123")
+    ticket = create_ticket(client, requester_headers)
+
+    response = upload_attachment(client, ticket["id"], requester_headers)
+
+    assert response.status_code == 201
+    attachment = response.json()[0]
+    assert attachment["original_filename"] == "evidencia.png"
+    assert attachment["content_type"] == "image/png"
+    assert attachment["uploaded_by"]["email"] == "solicitante@example.com"
+
+    detail_response = client.get(f"/api/tickets/{ticket['id']}", headers=admin_headers)
+    assert detail_response.status_code == 200
+    attachments = detail_response.json()["attachments"]
+    assert len(attachments) == 1
+    assert attachments[0]["id"] == attachment["id"]
+    assert attachments[0]["original_filename"] == "evidencia.png"
+
+    download_response = client.get(
+        f"/api/tickets/{ticket['id']}/attachments/{attachment['id']}",
+        headers=admin_headers,
+    )
+    assert download_response.status_code == 200
+    assert download_response.content == b"conteudo-do-anexo"
+    assert len(list(tmp_path.iterdir())) == 1
+
+
+def test_other_requester_cannot_upload_or_download_ticket_attachment(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path))
+    requester_headers = auth_headers(client, "solicitante@example.com", "SolicitanteTest@123")
+    other_headers = auth_headers(client, "outro@example.com", "OutroTest@123")
+    admin_headers = auth_headers(client, "admin@example.com", "AdminTest@123")
+    ticket = create_ticket(client, requester_headers)
+
+    denied_upload = upload_attachment(client, ticket["id"], other_headers)
+
+    assert denied_upload.status_code == 404
+    assert denied_upload.json()["error"]["message"] == "Chamado nao encontrado."
+    assert list(tmp_path.iterdir()) == []
+
+    allowed_upload = upload_attachment(client, ticket["id"], requester_headers)
+    assert allowed_upload.status_code == 201
+    attachment = allowed_upload.json()[0]
+
+    denied_download = client.get(
+        f"/api/tickets/{ticket['id']}/attachments/{attachment['id']}",
+        headers=other_headers,
+    )
+    assert denied_download.status_code == 404
+    assert denied_download.json()["error"]["message"] == "Chamado nao encontrado."
+
+    detail_response = client.get(f"/api/tickets/{ticket['id']}", headers=admin_headers)
+    assert detail_response.status_code == 200
+    assert len(detail_response.json()["attachments"]) == 1
+    assert len(list(tmp_path.iterdir())) == 1
+
+
+def test_technician_without_visibility_cannot_upload_or_download_ticket_attachment(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path))
+    requester_headers = auth_headers(client, "solicitante@example.com", "SolicitanteTest@123")
+    admin_headers = auth_headers(client, "admin@example.com", "AdminTest@123")
+    ticket = create_ticket(client, requester_headers)
+    other_technician = create_user(
+        client,
+        admin_headers,
+        "tecnico2@example.com",
+        "TECNICO",
+        "Tecnico2Test@123",
+    )
+
+    assign_response = client.put(
+        f"/api/tickets/{ticket['id']}",
+        json={"assignee_id": 2},
+        headers=admin_headers,
+    )
+    assert assign_response.status_code == 200
+
+    other_technician_headers = auth_headers(client, other_technician["email"], "Tecnico2Test@123")
+    denied_upload = upload_attachment(client, ticket["id"], other_technician_headers)
+
+    assert denied_upload.status_code == 404
+    assert denied_upload.json()["error"]["message"] == "Chamado nao encontrado."
+    assert list(tmp_path.iterdir()) == []
+
+    allowed_upload = upload_attachment(client, ticket["id"], requester_headers)
+    assert allowed_upload.status_code == 201
+    attachment = allowed_upload.json()[0]
+
+    denied_download = client.get(
+        f"/api/tickets/{ticket['id']}/attachments/{attachment['id']}",
+        headers=other_technician_headers,
+    )
+    assert denied_download.status_code == 404
+    assert denied_download.json()["error"]["message"] == "Chamado nao encontrado."
+
+    detail_response = client.get(f"/api/tickets/{ticket['id']}", headers=admin_headers)
+    assert detail_response.status_code == 200
+    assert len(detail_response.json()["attachments"]) == 1
+    assert len(list(tmp_path.iterdir())) == 1
 
 
 def test_requester_cannot_update_status(client: TestClient) -> None:

@@ -21,6 +21,28 @@ def create_ticket(client: TestClient, headers: dict[str, str], title: str = "Err
     return response.json()
 
 
+def create_user(
+    client: TestClient,
+    headers: dict[str, str],
+    email: str,
+    role: str,
+    password: str,
+) -> dict[str, object]:
+    response = client.post(
+        "/api/users",
+        json={
+            "name": "Usuario Comentarios",
+            "email": email,
+            "password": password,
+            "role": role,
+            "is_active": True,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
 def test_requester_can_create_ticket(client: TestClient) -> None:
     headers = auth_headers(client, "solicitante@example.com", "SolicitanteTest@123")
 
@@ -196,6 +218,83 @@ def test_terminal_ticket_status_cannot_change(client: TestClient) -> None:
     assert body["resolved_at"] is not None
     assert body["closed_at"] is not None
     assert len([audit for audit in body["audits"] if audit["action"] == "STATUS_ALTERADO"]) == 2
+
+
+def test_ticket_owner_can_comment_and_authorized_user_can_view_comment(client: TestClient) -> None:
+    requester_headers = auth_headers(client, "solicitante@example.com", "SolicitanteTest@123")
+    admin_headers = auth_headers(client, "admin@example.com", "AdminTest@123")
+    ticket = create_ticket(client, requester_headers)
+
+    response = client.post(
+        f"/api/tickets/{ticket['id']}/comments",
+        json={"message": "Comentario do solicitante dono."},
+        headers=requester_headers,
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["message"] == "Comentario do solicitante dono."
+    assert body["author"]["email"] == "solicitante@example.com"
+
+    detail_response = client.get(f"/api/tickets/{ticket['id']}", headers=admin_headers)
+    assert detail_response.status_code == 200
+    comments = detail_response.json()["comments"]
+    assert len(comments) == 1
+    assert comments[0]["message"] == "Comentario do solicitante dono."
+    assert comments[0]["author"]["email"] == "solicitante@example.com"
+
+
+def test_other_requester_cannot_comment_on_someone_elses_ticket(client: TestClient) -> None:
+    requester_headers = auth_headers(client, "solicitante@example.com", "SolicitanteTest@123")
+    other_headers = auth_headers(client, "outro@example.com", "OutroTest@123")
+    ticket = create_ticket(client, requester_headers)
+
+    response = client.post(
+        f"/api/tickets/{ticket['id']}/comments",
+        json={"message": "Tentativa de comentario indevida."},
+        headers=other_headers,
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["message"] == "Chamado nao encontrado."
+
+    detail_response = client.get(f"/api/tickets/{ticket['id']}", headers=requester_headers)
+    assert detail_response.status_code == 200
+    assert detail_response.json()["comments"] == []
+
+
+def test_unassigned_technician_cannot_comment_on_ticket_assigned_to_another_technician(client: TestClient) -> None:
+    requester_headers = auth_headers(client, "solicitante@example.com", "SolicitanteTest@123")
+    admin_headers = auth_headers(client, "admin@example.com", "AdminTest@123")
+    ticket = create_ticket(client, requester_headers)
+    other_technician = create_user(
+        client,
+        admin_headers,
+        "tecnico2@example.com",
+        "TECNICO",
+        "Tecnico2Test@123",
+    )
+
+    assign_response = client.put(
+        f"/api/tickets/{ticket['id']}",
+        json={"assignee_id": 2},
+        headers=admin_headers,
+    )
+    assert assign_response.status_code == 200
+
+    other_technician_headers = auth_headers(client, other_technician["email"], "Tecnico2Test@123")
+    response = client.post(
+        f"/api/tickets/{ticket['id']}/comments",
+        json={"message": "Tentativa de comentario tecnico indevida."},
+        headers=other_technician_headers,
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["message"] == "Chamado nao encontrado."
+
+    detail_response = client.get(f"/api/tickets/{ticket['id']}", headers=admin_headers)
+    assert detail_response.status_code == 200
+    assert detail_response.json()["comments"] == []
 
 
 def test_requester_cannot_update_status(client: TestClient) -> None:
